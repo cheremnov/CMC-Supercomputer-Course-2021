@@ -70,18 +70,16 @@ __device__ double laplace(const double* mesh,
 __global__ void methodIterKernel(const double* prev_mesh, const double* cur_mesh, double* next_mesh,
                                  int rows, int columns, int z_columns,
                                  double tau, double h){
-
-    // A grid-striding loop over the flattened 3D mesh
-    for(int row_idx = 1; row_idx <= rows; ++row_idx){
-        for(int column_idx = 1 + blockIdx.x; column_idx <= columns; column_idx += gridDim.x){
-            for(int z_idx = 1 + threadIdx.x; z_idx <= z_columns; z_idx += blockDim.x){
-                int packed_idx = packCudaIdx(row_idx, column_idx, z_idx,
-											 rows + 2, columns + 2, z_columns + 2);
-                next_mesh[packed_idx] = tau * tau * laplace(cur_mesh, row_idx, column_idx, z_idx,
-                                                            rows + 2, columns + 2, z_columns + 2, h)
-                                        - prev_mesh[packed_idx] + 2 * cur_mesh[packed_idx];
-            }
-        }
+    int row_idx = blockDim.x * blockIdx.x + threadIdx.x;
+    int column_idx = blockDim.y * blockIdx.y + threadIdx.y;
+    int z_idx = blockDim.z * blockIdx.z + threadIdx.z;
+    if(row_idx >= 1 && row_idx <= rows &&
+       column_idx >= 1 && column_idx <= columns &&
+       z_idx >= 1 && z_idx <= z_columns){
+        int packed_idx = packCudaIdx(row_idx, column_idx, z_idx, rows + 2, columns + 2, z_columns + 2);
+        next_mesh[packed_idx] = tau * tau * laplace(cur_mesh, row_idx, column_idx, z_idx,
+                                                    rows + 2, columns + 2, z_columns + 2, h)
+                                - prev_mesh[packed_idx] + 2 * cur_mesh[packed_idx];
     }
 }
 
@@ -100,8 +98,16 @@ void callMethodIterKernel(DeviceMemoryDescr_t* device_memory_p,
                cudaMemcpyHostToDevice);
     cudaMemcpy(device_memory_p->next_mesh_, host_memory_p->next_mesh_, padded_capacity * sizeof(double),
                cudaMemcpyHostToDevice);
-    int threads_per_block = 1024;
-    int blocks_per_grid = 2;
+    int blocks_per_axis = 256;
+    /**
+     * Each thread computes a single mesh element
+     * Sometimes can't divide the mesh elements evenly on threads.
+     * For this case, pad the threads' dimensions.
+     */
+    assert(blocks_per_axis <= 65536 &&
+           (rows / blocks_per_axis + 1) * (columns / blocks_per_axis + 1) * (z_columns / blocks_per_axis + 1) <= 1024);
+    dim3 blocks_per_grid(blocks_per_axis, blocks_per_axis, blocks_per_axis);
+    dim3 threads_per_block(rows / blocks_per_axis + 1, columns / blocks_per_axis + 1, z_columns / blocks_per_axis + 1);
     methodIterKernel<<<blocks_per_grid, threads_per_block>>>(device_memory_p->prev_mesh_, device_memory_p->cur_mesh_, device_memory_p->next_mesh_,
                                                              rows, columns, z_columns, tau, h);
     cudaMemcpy(host_memory_p->next_mesh_, device_memory_p->next_mesh_, padded_capacity * sizeof(double),
